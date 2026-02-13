@@ -1,0 +1,430 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { 
+  Cpu, Shield, Bitcoin, Zap, LayoutDashboard, RefreshCcw, 
+  Globe, Sun, Clock, Calendar as CalendarIcon,
+  ChevronRight, ArrowUpRight, ArrowDownRight, Newspaper,
+  AlertCircle, Sparkles, Volume2, Search, BrainCircuit, TrendingUp
+} from 'lucide-react';
+
+// API Configuration
+const apiKey = ""; // 환경에 의해 자동 주입됨
+const GEMINI_TEXT_MODEL = "gemini-2.5-flash-preview-09-2025";
+const GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts";
+
+const App = () => {
+  const [loading, setLoading] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date());
+  const [weather, setWeather] = useState({ temp: '4°C', condition: '맑음', location: '광명시 철산동' });
+  const [newsData, setNewsData] = useState({
+    aiInfra: [],
+    techLev: [],
+    crypto: [],
+    defense: [],
+    aiAnalysis: "데이터 수집 중...",
+    deepDive: ""
+  });
+  
+  // 글로벌 토픽 초기 상태 (검색 중 메시지)
+  const [hotTopics, setHotTopics] = useState([
+    "실시간 글로벌 뉴스를 검색하고 있습니다...",
+    "잠시만 기다려 주시면 최신 정보를 불러옵니다.",
+    "네트워크 상태에 따라 잠시 소요될 수 있습니다."
+  ]);
+  const [selectedNewsAnalysis, setSelectedNewsAnalysis] = useState(null);
+
+  // 시장 지수 티커 (한국식 상승: 빨강, 하락: 파랑 적용)
+  const [tickerIndex, setTickerIndex] = useState(0);
+  const marketIndices = [
+    { name: "KOSPI", value: "2,582.41", today: "+0.45%", yesterday: "+1.20%", trend: "up" },
+    { name: "KOSDAQ", value: "862.10", today: "-0.12%", yesterday: "+0.55%", trend: "down" },
+    { name: "NASDAQ 100", value: "17,920.50", today: "+1.24%", yesterday: "-0.82%", trend: "up" },
+    { name: "S&P 500", value: "5,042.30", today: "+0.82%", yesterday: "-0.45%", trend: "up" },
+    { name: "구리 (Copper)", value: "$4.12", today: "+1.05%", yesterday: "+0.30%", trend: "up" },
+  ];
+
+  const [topicIndex, setTopicIndex] = useState(0);
+
+  // 티커 자동 회전 로직
+  useEffect(() => {
+    const tickerTimer = setInterval(() => {
+      setTickerIndex((prev) => (prev + 1) % marketIndices.length);
+    }, 4000);
+    const topicTimer = setInterval(() => {
+      if (hotTopics.length > 0) {
+        setTopicIndex((prev) => (prev + 1) % hotTopics.length);
+      }
+    }, 5000);
+    return () => {
+      clearInterval(tickerTimer);
+      clearInterval(topicTimer);
+    };
+  }, [marketIndices.length, hotTopics.length]);
+
+  // Gemini API 호출 래퍼 (안정성 강화)
+  const callGemini = async (payload, model = GEMINI_TEXT_MODEL, endpoint = "generateContent") => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:${endpoint}?key=${apiKey}`;
+    let delay = 1000;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`API Error: ${response.status} - ${errorText}`);
+        }
+        
+        const data = await response.json();
+        if (!data) throw new Error("Invalid API response");
+        return data;
+      } catch (e) { 
+        if (i === 4) throw e; 
+      }
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+  };
+
+  // PCM 데이터를 WAV로 변환하여 재생
+  const createWavUrl = (base64Pcm, sampleRate = 24000) => {
+    try {
+      const pcmData = Uint8Array.from(atob(base64Pcm), c => c.charCodeAt(0)).buffer;
+      const wavHeader = new ArrayBuffer(44);
+      const view = new DataView(wavHeader);
+      const writeString = (offset, string) => {
+        for (let i = 0; i < string.length; i++) view.setUint8(offset + i, string.charCodeAt(i));
+      };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 32 + pcmData.byteLength, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, pcmData.byteLength, true);
+      return URL.createObjectURL(new Blob([wavHeader, pcmData], { type: 'audio/wav' }));
+    } catch (e) {
+      console.error("WAV Creation Error", e);
+      return null;
+    }
+  };
+
+  const playTTS = async (text) => {
+    if (!text) return;
+    try {
+      const result = await callGemini({
+        contents: [{ parts: [{ text: `읽어줘: ${text}` }] }],
+        generationConfig: { 
+          responseModalities: ["AUDIO"], 
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } } } 
+        }
+      }, GEMINI_TTS_MODEL);
+      const audioData = result?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (audioData) {
+        const url = createWavUrl(audioData);
+        if (url) new Audio(url).play();
+      }
+    } catch (error) { console.error("TTS Error:", error); }
+  };
+
+  // 실시간 글로벌 토픽 뉴스 수집 (인증 에러 방지를 위해 로직 최적화)
+  const fetchRealTimeTopics = async () => {
+    try {
+      // 401 에러 방지를 위해 tools와 responseMimeType을 분리하여 시도하거나 명확한 프롬프트 전달
+      const prompt = `오늘(${new Date().toLocaleDateString()}) 현재 전세계 및 국내에서 가장 중요한 경제, 정치 뉴스 헤드라인 7개를 알려줘. 각 헤드라인은 35자 이내의 한국어로 작성해. 결과는 반드시 JSON { "topics": ["뉴스1", "뉴스2", ...] } 형식으로만 대답해.`;
+
+      const result = await callGemini({
+        contents: [{ parts: [{ text: prompt }] }],
+        tools: [{ "google_search": {} }], // 검색 도구 사용
+        // JSON 응답을 강제하면 가끔 도구와 충돌하므로, 프롬프트로만 유도하거나 설정을 조절
+      });
+
+      let text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      // 마크다운 코드 블록 제거 후 파싱
+      if (text) {
+        text = text.replace(/```json|```/g, "").trim();
+        const content = JSON.parse(text);
+        if (content.topics && Array.isArray(content.topics)) {
+          setHotTopics(content.topics);
+          setTopicIndex(0);
+        }
+      }
+    } catch (error) {
+      console.error("Real-time Topics Error:", error);
+      // 폴백 뉴스 (검색 실패 시)
+      setHotTopics([
+        "실시간 뉴스 검색 중 일시적인 지연이 발생했습니다.",
+        "정부, 반도체 및 신산업 규제 혁신 방안 발표 예정",
+        "미 연준 금리 향방 주시... 시장의 경계감 고조",
+        "글로벌 구리 공급 부족 우려에 가격 변동성 확대",
+        "주요 빅테크 기업 실적 발표 결과에 따른 나스닥 영향 분석",
+        "유럽 방산 주도권 경쟁 심화... 한국 방산 수출 기회 모색",
+        "가상자산 시장 비트코인 1억 원 안착 여부 주목"
+      ]);
+    }
+  };
+
+  const fetchDeepDive = async () => {
+    setAiLoading(true);
+    try {
+      const prompt = `시장지표: ${JSON.stringify(marketIndices)}, 뉴스: ${JSON.stringify(newsData)}. 준범님의 목표 수익률과 포트폴리오(AI인프라, 비트코인) 기반 전략 리포트 작성해줘.`;
+      const result = await callGemini({ contents: [{ parts: [{ text: prompt }] }] });
+      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) setNewsData(prev => ({ ...prev, deepDive: text }));
+    } catch (error) { console.error("Deep Dive Error:", error); } finally { setAiLoading(false); }
+  };
+
+  const analyzeNewsItem = async (newsTitle) => {
+    setAiLoading(true);
+    try {
+      const prompt = `"${newsTitle}" 기사가 투자자에게 미칠 영향 분석해줘.`;
+      const result = await callGemini({ contents: [{ parts: [{ text: prompt }] }] });
+      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) setSelectedNewsAnalysis({ title: newsTitle, analysis: text });
+    } catch (error) { console.error("News Analysis Error:", error); } finally { setAiLoading(false); }
+  };
+
+  const fetchDashboardData = async () => {
+    setLoading(true);
+    try {
+      const prompt = `2026년 2월 13일 투자 뉴스 리포트 작성해줘. JSON 형식 { aiInfra: [], techLev: [], crypto: [], defense: [], strategy: "", weather: {} }`;
+      const result = await callGemini({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { responseMimeType: "application/json" } });
+      
+      const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        const content = JSON.parse(text);
+        setNewsData({ ...content, aiAnalysis: content.strategy, deepDive: "" });
+        if (content.weather) setWeather({ ...weather, ...content.weather });
+      }
+      
+      await fetchRealTimeTopics();
+    } catch (error) { console.error("Dashboard Data Fetch Error:", error); } finally { setLoading(false); }
+  };
+
+  useEffect(() => {
+    fetchDashboardData();
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const formatDate = (date) => {
+    const days = ['일', '월', '화', '수', '목', '금', '토'];
+    return `${date.getFullYear()}년 ${date.getMonth() + 1}월 ${date.getDate()}일 (${days[date.getDay()]})`;
+  };
+
+  const sectors = [
+    { id: 'aiInfra', name: 'AI 인프라 (CARR/VRT/ETN)', icon: <Cpu className="w-5 h-5 text-blue-700" /> },
+    { id: 'techLev', name: '나스닥 레버리지 (QLD)', icon: <Zap className="w-5 h-5 text-amber-600" /> },
+    { id: 'crypto', name: '가상자산 (BTC)', icon: <Bitcoin className="w-5 h-5 text-orange-600" /> },
+    { id: 'defense', name: '유럽 방산 (ETF)', icon: <Shield className="w-5 h-5 text-emerald-600" /> },
+  ];
+
+  return (
+    <div className="min-h-screen bg-white text-slate-900 font-sans selection:bg-blue-100 leading-normal">
+      {/* Top Utility Bar */}
+      <div className="bg-slate-50 border-b border-slate-200">
+        <div className="max-w-7xl mx-auto px-6 h-12 flex justify-between items-center text-[11px] font-bold text-slate-500 tracking-wider uppercase">
+          <div className="flex items-center gap-4">
+            <span className="flex items-center gap-1.5"><Globe className="w-3.5 h-3.5" /> Market Pulse</span>
+            <span className="text-slate-300">|</span>
+            <span className="text-blue-700 font-black">Global Markets Live</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 border-r border-slate-200 pr-4">
+              <span>철산동</span>
+              <span className="flex items-center gap-1 text-slate-700">
+                <Sun className="w-3.5 h-3.5 text-orange-500" /> {weather.temp}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CalendarIcon className="w-3.5 h-3.5" /> {formatDate(currentTime)}
+              <Clock className="w-3.5 h-3.5 ml-1" /> {currentTime.toLocaleTimeString()}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Header */}
+      <header className="max-w-7xl mx-auto px-6 py-10 border-b-4 border-slate-900">
+        <div className="flex flex-col md:flex-row justify-between items-end gap-6">
+          <div className="flex-1">
+            <div className="inline-flex items-center gap-2 bg-slate-900 text-white px-3 py-1 text-[10px] font-black uppercase tracking-[0.25em] mb-4 shadow-[3px_3px_0px_#2563eb]">
+              <Sparkles className="w-3 h-3 text-blue-400" /> Edited by Junbeom Lee
+            </div>
+            <h1 className="text-7xl font-serif font-black tracking-tight leading-none">
+              <span className="text-blue-700">THE MUANG</span>{' '}
+              <span className="text-slate-900">TIMES</span>
+            </h1>
+          </div>
+          
+          <div className="text-right flex flex-col items-end shrink-0">
+            <div className="bg-yellow-400 px-5 py-0 shadow-[4px_4px_0px_#000] border-2 border-slate-900 min-w-[320px] h-[75px] flex flex-col overflow-hidden relative text-center">
+              <div 
+                className="transition-transform duration-500 ease-in-out w-full"
+                style={{ transform: `translateY(-${tickerIndex * 75}px)` }}
+              >
+                {marketIndices.map((idx, i) => (
+                  <div key={i} className="h-[75px] flex flex-col justify-center items-center">
+                    <div className="flex items-center gap-3">
+                      <span className="text-slate-900 font-black text-base uppercase tracking-tighter">{idx.name}</span>
+                      <span className="text-slate-900 font-mono text-lg font-bold tracking-tight">{idx.value}</span>
+                    </div>
+                    <div className="flex gap-4 mt-1">
+                      <div className="flex flex-col items-center">
+                        <span className="text-[8px] text-slate-600 font-black uppercase tracking-widest leading-none">Today</span>
+                        <span className={`text-[10px] font-black leading-none mt-1 ${idx.today.startsWith('+') ? 'text-rose-700' : 'text-blue-700'}`}>
+                          {idx.today} {idx.today.startsWith('+') ? '▲' : '▼'}
+                        </span>
+                      </div>
+                      <div className="w-[1px] bg-slate-400 h-4 self-center" />
+                      <div className="flex flex-col items-center">
+                        <span className="text-[8px] text-slate-600 font-black uppercase tracking-widest leading-none">Yesterday</span>
+                        <span className={`text-[10px] font-black leading-none mt-1 ${idx.yesterday.startsWith('+') ? 'text-rose-700' : 'text-blue-700'}`}>
+                          {idx.yesterday} {idx.yesterday.startsWith('+') ? '▲' : '▼'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <p className="text-slate-500 text-[10px] font-black mt-2 tracking-widest uppercase italic font-serif">GMTCK DRE JUNBUM'S LIVE TRACKER</p>
+          </div>
+        </div>
+      </header>
+
+      {/* GLOBAL TOPIC - 레이아웃 및 텍스트 정렬 완전 수정 */}
+      <section className="bg-slate-50 py-8 border-b border-slate-200">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-col lg:flex-row items-center gap-6">
+            <div className="bg-white p-4 border-2 border-slate-900 shadow-[4px_4px_0px_#2563eb] shrink-0">
+              <AlertCircle className="w-6 h-6 text-blue-700" />
+            </div>
+            
+            <div className="flex-1 flex flex-col h-24 overflow-hidden relative">
+              <div className="flex items-center gap-3 mb-1 shrink-0">
+                <span className="text-xs font-black text-blue-700 uppercase tracking-widest leading-none">Global Topic</span>
+                <button 
+                  onClick={() => playTTS(hotTopics[topicIndex])} 
+                  className="p-1 hover:bg-blue-100 rounded text-blue-700 transition-colors" 
+                  title="헤드라인 읽기"
+                >
+                  <Volume2 className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-hidden relative border-l-2 border-slate-200 pl-4">
+                <div 
+                  className="transition-transform duration-500 ease-in-out absolute w-full top-0 left-4"
+                  style={{ transform: `translateY(-${topicIndex * 4}rem)` }}
+                >
+                  {hotTopics.map((topic, i) => (
+                    <div key={i} className="h-16 flex items-center pr-4">
+                      <h2 className="text-2xl font-bold text-slate-900 leading-tight">
+                        "{topic}"
+                      </h2>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-2 shrink-0">
+              <button 
+                onClick={fetchDeepDive} 
+                disabled={aiLoading} 
+                className="bg-slate-900 text-white border-2 border-slate-900 px-4 py-2 text-sm font-black hover:bg-blue-700 transition-all shadow-[4px_4px_0px_#2563eb] active:translate-y-0.5 active:shadow-none flex items-center gap-2"
+              >
+                <Sparkles className="w-4 h-4" /> AI 심층 분석
+              </button>
+              <button 
+                onClick={fetchDashboardData} 
+                disabled={loading} 
+                className="bg-white border-2 border-slate-900 px-4 py-2 text-sm font-black hover:bg-slate-50 shadow-[2px_2px_0px_#000]"
+              >
+                뉴스 갱신
+              </button>
+            </div>
+          </div>
+          
+          {newsData.deepDive && (
+            <div className="mt-8 bg-blue-50 border-2 border-blue-100 p-6 rounded-xl animate-in fade-in slide-in-from-top-4 shadow-sm">
+              <h3 className="flex items-center gap-2 text-blue-800 font-black mb-3 text-lg font-sans underline decoration-blue-200 decoration-2 underline-offset-4"><BrainCircuit className="w-5 h-5" /> AI 마켓 딥다이브 리포트</h3>
+              <p className="text-blue-900 leading-relaxed whitespace-pre-wrap text-sm italic font-medium font-sans">{newsData.deepDive}</p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Main Grid Content */}
+      <main className="max-w-7xl mx-auto px-6 py-12">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-x-10 gap-y-12">
+          {sectors.map((sector) => (
+            <section key={sector.id} className="flex flex-col">
+              <div className="flex items-center gap-3 mb-6 pb-2 border-b-2 border-slate-900">
+                {sector.icon}
+                <h3 className="text-lg font-black text-slate-900 uppercase tracking-tight font-sans">{sector.name}</h3>
+              </div>
+              <div className="divide-y divide-slate-100">
+                {loading ? [1, 2].map(i => <div key={i} className="py-6 animate-pulse bg-slate-50 mb-2 rounded h-24" />) : 
+                  newsData[sector.id]?.map((item, idx) => (
+                    <div key={idx} className="group py-5 px-2 hover:bg-slate-50 transition-colors">
+                      <div className="flex justify-between items-center mb-1.5">
+                        <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1 font-sans uppercase"><Newspaper className="w-3 h-3" /> {item.source}</span>
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded font-sans uppercase ${item.impact === '호재' ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}`}>{item.impact}</span>
+                      </div>
+                      <h4 className="text-slate-900 font-bold text-[15px] mb-2 leading-snug group-hover:text-blue-700 transition-colors font-sans tracking-tight">{item.title}</h4>
+                      <p className="text-slate-500 text-xs leading-relaxed mb-4 line-clamp-2 font-sans">{item.summary}</p>
+                      <button onClick={() => analyzeNewsItem(item.title)} className="text-[10px] font-black text-blue-600 hover:underline flex items-center gap-1 font-sans uppercase tracking-wider"><Sparkles className="w-3 h-3" /> AI 분석 보기</button>
+                    </div>
+                  ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </main>
+
+      {/* AI Analysis Modal */}
+      {selectedNewsAnalysis && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white border-4 border-slate-900 max-w-lg w-full p-8 shadow-[12px_12px_0px_#000] animate-in zoom-in-95">
+            <div className="flex justify-between items-start mb-6">
+              <h3 className="text-xl font-black text-slate-900 pr-8 flex items-center gap-2 font-sans">
+                <BrainCircuit className="w-6 h-6 text-blue-600" /> AI 심층 뉴스 분석</h3>
+              <button onClick={() => setSelectedNewsAnalysis(null)} className="text-slate-400 hover:text-slate-900 text-2xl font-bold">✕</button>
+            </div>
+            <div className="bg-slate-50 p-4 border border-slate-200 mb-6 italic text-xs font-bold text-slate-500 rounded text-center font-sans">
+              "{selectedNewsAnalysis.title}"
+            </div>
+            <div className="text-slate-800 font-semibold leading-relaxed mb-8 text-sm font-sans whitespace-pre-wrap">
+              {selectedNewsAnalysis.analysis}
+            </div>
+            <button onClick={() => setSelectedNewsAnalysis(null)} className="w-full bg-slate-900 text-white font-black py-4 hover:bg-blue-600 transition-all active:scale-[0.98] font-sans uppercase tracking-widest">분석 닫기</button>
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <footer className="bg-slate-900 text-white mt-20">
+        <div className="max-w-7xl mx-auto px-6 py-12 flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase tracking-widest font-sans">
+          <p>© 2026 JUNBEOM LEE INVESTMENT DASHBOARD</p>
+          <div className="flex gap-4 items-center">
+            <span className="text-blue-400 flex items-center gap-1 font-sans"><Sparkles className="w-3 h-3" /> Powered by Gemini 2.5</span>
+            <span>Gwangmyeong, KR</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+};
+
+export default App;
